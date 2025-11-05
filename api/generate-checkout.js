@@ -1,4 +1,4 @@
-// CORRECTED CODE - v4.7 - Currency & Multi-Product Fix
+// SIMPLIFIED CODE - v5.1 - Create Products from Scratch (Any Currency)
 export default async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -7,226 +7,104 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') { return res.status(200).end(); }
   if (req.method !== 'POST') { return res.status(405).json({ error: 'Method Not Allowed' }); }
   
-  const { MASTER_STORE_DOMAIN, ADMIN_API_ACCESS_TOKEN, TEMPLATE_PRODUCT_ID, STORE_BASE_CURRENCY } = process.env;
-  if (!MASTER_STORE_DOMAIN || !ADMIN_API_ACCESS_TOKEN || !TEMPLATE_PRODUCT_ID) {
+  const { MASTER_STORE_DOMAIN, ADMIN_API_ACCESS_TOKEN } = process.env;
+  if (!MASTER_STORE_DOMAIN || !ADMIN_API_ACCESS_TOKEN) {
       console.error("CRITICAL: Missing environment variables!");
       return res.status(500).json({ error: "Server configuration error." });
   }
   
-  // Default to EUR if not specified
-  const baseCurrency = STORE_BASE_CURRENCY || 'EUR';
-  
   const shopifyRestEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/2024-10`;
   const shopifyGraphQLEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/2024-10/graphql.json`;
-  
-  // Exchange rates (update these regularly or use an API)
-  const exchangeRates = {
-    'EUR': 1.0,
-    'GBP': 1.17,  // 1 GBP = 1.17 EUR (example rate)
-    'USD': 0.92,  // 1 USD = 0.92 EUR (example rate)
-    // Add more currencies as needed
-  };
-  
-  // Helper function to convert price to base currency (EUR)
-  function convertToBaseCurrency(price, fromCurrency) {
-    if (fromCurrency === baseCurrency) {
-      return price;
-    }
-    
-    const rate = exchangeRates[fromCurrency];
-    if (!rate) {
-      console.warn(`No exchange rate for ${fromCurrency}, using original price`);
-      return price;
-    }
-    
-    // Convert to EUR
-    const convertedPrice = price * rate;
-    console.log(`Converted ${price} ${fromCurrency} to ${convertedPrice.toFixed(2)} ${baseCurrency}`);
-    return convertedPrice;
-  }
   
   try {
     const { items, currency } = req.body;
     console.log('Request body:', JSON.stringify(req.body, null, 2));
+    console.log(`Creating ${items.length} new product(s)...`);
     
-    // Convert all prices to base currency
-    const convertedItems = items.map(item => ({
-      ...item,
-      originalPrice: item.price,
-      originalCurrency: currency,
-      price: convertToBaseCurrency(item.price, currency)
-    }));
-    
-    console.log('Converted items:', JSON.stringify(convertedItems, null, 2));
-    
-    // STEP 1: Get current product state
-    console.log('Fetching product configuration...');
-    const productResponse = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}.json`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
-      },
-    });
-    
-    if (!productResponse.ok) {
-      throw new Error('Failed to fetch product');
-    }
-    
-    const productData = await productResponse.json();
-    const product = productData.product;
-    console.log('Current product state:', JSON.stringify({
-      title: product.title,
-      options: product.options,
-      variants: product.variants?.length
-    }, null, 2));
-    
-    // Check if product has multiple variants (more than just default)
-    const hasMultipleVariants = product.variants && product.variants.length > 1;
-    const hasVariantOptions = product.options && product.options.length > 0 && 
-                              product.options.some(opt => opt.name !== 'Title' && opt.values.length > 1);
-    
-    const useVariants = hasMultipleVariants || hasVariantOptions;
-    
-    console.log(`Product variant strategy: ${useVariants ? 'CREATE_VARIANTS' : 'UPDATE_PRODUCT'}`);
-    
-    let lineItems = [];
-    
-    if (useVariants) {
-      // STRATEGY A: Product has variants - create new variants for each item
-      console.log('Creating variants for cart items...');
+    // STEP 1: Create a product for each unique item
+    const productCreationPromises = items.map(async (item, index) => {
+      const timestamp = Date.now();
+      const random = Math.random().toString(36).substring(2, 8);
       
-      const variantCreationPromises = convertedItems.map(async (item, index) => {
-        const timestamp = Date.now();
-        const random = Math.random().toString(36).substring(2, 8);
-        const uniqueOption = `${item.title.substring(0, 40)}-${timestamp}-${random}`;
-        
-        const variantData = {
-          variant: {
-            option1: uniqueOption,
-            price: item.price.toFixed(2), // Use converted price
-            inventory_policy: 'deny',
-            inventory_management: null,
-            requires_shipping: true,
-          }
-        };
-        
-        // Add image if provided
-        if (item.image) {
-          variantData.variant.image_src = item.image;
-        }
-        
-        console.log(`Creating variant ${index}:`, JSON.stringify(variantData, null, 2));
-        
-        const response = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}/variants.json`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
-          },
-          body: JSON.stringify(variantData),
-        });
-        
-        const result = await response.json();
-        
-        if (!response.ok || !result.variant?.id) {
-          console.error(`Failed to create variant ${index}:`, JSON.stringify(result, null, 2));
-          throw new Error(`Failed to create variant: ${JSON.stringify(result.errors)}`);
-        }
-        
-        console.log(`Successfully created variant ${index}: ID ${result.variant.id}`);
-        
-        // Add line item with custom properties to track original product info
-        return {
-          variantId: `gid://shopify/ProductVariant/${result.variant.id}`,
-          quantity: item.quantity,
-          customAttributes: [
-            { key: "_original_product", value: item.title },
-            { key: "_original_price", value: `${item.originalPrice} ${item.originalCurrency}` },
-            { key: "_base_price", value: `${item.price.toFixed(2)} ${baseCurrency}` }
-          ]
-        };
-      });
-      
-      lineItems = await Promise.all(variantCreationPromises);
-      
-    } else {
-      // STRATEGY B: Product has NO variants - update product title/image and use existing variant
-      console.log('Updating product details (no variant creation)...');
-      
-      // For single-item carts, update the product
-      const firstItem = convertedItems[0];
-      
-      const productUpdatePayload = {
+      const productData = {
         product: {
-          id: parseInt(TEMPLATE_PRODUCT_ID),
-          title: firstItem.title,
+          title: item.title,
+          body_html: item.description || `Product: ${item.title}`,
+          vendor: "Dynamic Cart",
+          product_type: "Cart Item",
+          status: "active",
+          published: false, // Keep unpublished so it doesn't show in store
+          variants: [
+            {
+              price: item.price.toString(),
+              inventory_policy: 'deny',
+              inventory_management: null,
+              requires_shipping: true,
+              sku: `CART-${timestamp}-${random}`
+            }
+          ],
+          options: [
+            {
+              name: "Title",
+              values: ["Default Title"]
+            }
+          ]
         }
       };
       
       // Add image if provided
-      if (firstItem.image) {
-        productUpdatePayload.product.images = [
+      if (item.image) {
+        productData.product.images = [
           {
-            src: firstItem.image,
+            src: item.image,
             position: 1
           }
         ];
       }
       
-      // Update the existing variant's price (use converted price)
-      if (product.variants && product.variants.length > 0) {
-        const existingVariantId = product.variants[0].id;
-        productUpdatePayload.product.variants = [
-          {
-            id: existingVariantId,
-            price: firstItem.price.toFixed(2), // Use converted price
-            inventory_policy: 'deny',
-            inventory_management: null
-          }
-        ];
-      }
+      console.log(`Creating product ${index + 1}:`, JSON.stringify({
+        title: productData.product.title,
+        price: productData.product.variants[0].price,
+        hasImage: !!item.image
+      }, null, 2));
       
-      console.log('Updating product:', JSON.stringify(productUpdatePayload, null, 2));
-      
-      const updateResponse = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}.json`, {
-        method: 'PUT',
+      const response = await fetch(`${shopifyRestEndpoint}/products.json`, {
+        method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
         },
-        body: JSON.stringify(productUpdatePayload),
+        body: JSON.stringify(productData),
       });
       
-      const updateResult = await updateResponse.json();
+      const result = await response.json();
       
-      if (!updateResponse.ok) {
-        console.error('Failed to update product:', JSON.stringify(updateResult, null, 2));
-        throw new Error('Failed to update product details');
+      if (!response.ok || !result.product?.id) {
+        console.error(`Failed to create product ${index + 1}:`, JSON.stringify(result, null, 2));
+        throw new Error(`Failed to create product: ${JSON.stringify(result.errors)}`);
       }
       
-      console.log('Product updated successfully');
+      const variantId = result.product.variants[0].id;
+      console.log(`Successfully created product ${index + 1}: Product ID ${result.product.id}, Variant ID ${variantId}`);
       
-      // Use the existing variant for all items
-      const variantId = updateResult.product.variants[0].id;
-      const totalQuantity = convertedItems.reduce((sum, item) => sum + item.quantity, 0);
-      
-      lineItems = [
-        {
-          variantId: `gid://shopify/ProductVariant/${variantId}`,
-          quantity: totalQuantity,
-          customAttributes: [
-            { key: "_original_product", value: firstItem.title },
-            { key: "_original_price", value: `${firstItem.originalPrice} ${firstItem.originalCurrency}` },
-            { key: "_base_price", value: `${firstItem.price.toFixed(2)} ${baseCurrency}` }
-          ]
-        }
-      ];
-    }
+      return {
+        productId: result.product.id,
+        variantId: `gid://shopify/ProductVariant/${variantId}`,
+        quantity: item.quantity
+      };
+    });
+    
+    const createdProducts = await Promise.all(productCreationPromises);
+    
+    // STEP 2: Create line items for draft order
+    const lineItems = createdProducts.map(product => ({
+      variantId: product.variantId,
+      quantity: product.quantity
+    }));
     
     console.log('Line items for draft order:', JSON.stringify(lineItems, null, 2));
     
-    // STEP 2: Create draft order using GraphQL
+    // STEP 3: Create draft order using GraphQL
     const draftOrderMutation = `
       mutation draftOrderCreate($input: DraftOrderInput!) {
         draftOrderCreate(input: $input) {
@@ -253,8 +131,7 @@ export default async function handler(req, res) {
         variables: { 
           input: { 
             lineItems: lineItems,
-            // Use base currency for the draft order
-            presentmentCurrencyCode: baseCurrency
+            presentmentCurrencyCode: currency
           } 
         }, 
       }),
@@ -267,14 +144,56 @@ export default async function handler(req, res) {
     
     if (data?.userErrors && data.userErrors.length > 0) {
       console.error("Draft order user errors:", data.userErrors);
+      
+      // If draft order fails, clean up created products
+      console.log('Cleaning up created products...');
+      await Promise.all(createdProducts.map(async (product) => {
+        try {
+          await fetch(`${shopifyRestEndpoint}/products/${product.productId}.json`, {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
+            },
+          });
+          console.log(`Deleted product ${product.productId}`);
+        } catch (err) {
+          console.error(`Failed to delete product ${product.productId}:`, err);
+        }
+      }));
+      
       throw new Error(`Shopify validation error: ${data.userErrors[0].message}`);
     }
     
     if (data?.draftOrder?.invoiceUrl) {
       console.log('SUCCESS! Checkout URL generated:', data.draftOrder.invoiceUrl);
-      return res.status(200).json({ checkoutUrl: data.draftOrder.invoiceUrl });
+      console.log(`Created ${createdProducts.length} product(s) for this order`);
+      
+      // Return success with product IDs for potential cleanup later
+      return res.status(200).json({ 
+        checkoutUrl: data.draftOrder.invoiceUrl,
+        productIds: createdProducts.map(p => p.productId)
+      });
     } else {
       console.error("No invoice URL in response:", JSON.stringify(draftOrderResult, null, 2));
+      
+      // Clean up created products
+      console.log('Cleaning up created products...');
+      await Promise.all(createdProducts.map(async (product) => {
+        try {
+          await fetch(`${shopifyRestEndpoint}/products/${product.productId}.json`, {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
+            },
+          });
+          console.log(`Deleted product ${product.productId}`);
+        } catch (err) {
+          console.error(`Failed to delete product ${product.productId}:`, err);
+        }
+      }));
+      
       throw new Error('Could not create the draft order checkout URL.');
     }
     
