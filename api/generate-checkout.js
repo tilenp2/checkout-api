@@ -1,4 +1,4 @@
-// SIMPLIFIED CODE - v5.1 - Create Products from Scratch (Any Currency)
+// SIMPLIFIED CODE - v5.2 - Create Products from Scratch with Fixed Image Upload
 export default async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -33,7 +33,7 @@ export default async function handler(req, res) {
           vendor: "Dynamic Cart",
           product_type: "Cart Item",
           status: "active",
-          published: false, // Keep unpublished so it doesn't show in store
+          published: false,
           variants: [
             {
               price: item.price.toString(),
@@ -52,22 +52,13 @@ export default async function handler(req, res) {
         }
       };
       
-      // Add image if provided
-      if (item.image) {
-        productData.product.images = [
-          {
-            src: item.image,
-            position: 1
-          }
-        ];
-      }
-      
       console.log(`Creating product ${index + 1}:`, JSON.stringify({
         title: productData.product.title,
         price: productData.product.variants[0].price,
-        hasImage: !!item.image
+        image: item.image || 'none'
       }, null, 2));
       
+      // Create product first
       const response = await fetch(`${shopifyRestEndpoint}/products.json`, {
         method: 'POST',
         headers: {
@@ -84,11 +75,44 @@ export default async function handler(req, res) {
         throw new Error(`Failed to create product: ${JSON.stringify(result.errors)}`);
       }
       
+      const productId = result.product.id;
       const variantId = result.product.variants[0].id;
-      console.log(`Successfully created product ${index + 1}: Product ID ${result.product.id}, Variant ID ${variantId}`);
+      console.log(`Successfully created product ${index + 1}: Product ID ${productId}, Variant ID ${variantId}`);
+      
+      // Add image separately after product creation (more reliable)
+      if (item.image && item.image.startsWith('https://')) {
+        console.log(`Uploading image for product ${productId}...`);
+        try {
+          const imageResponse = await fetch(`${shopifyRestEndpoint}/products/${productId}/images.json`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
+            },
+            body: JSON.stringify({
+              image: {
+                src: item.image
+              }
+            }),
+          });
+          
+          const imageResult = await imageResponse.json();
+          
+          if (imageResponse.ok && imageResult.image?.id) {
+            console.log(`Image uploaded successfully for product ${productId}`);
+          } else {
+            console.error(`Failed to upload image for product ${productId}:`, JSON.stringify(imageResult, null, 2));
+          }
+        } catch (imageError) {
+          console.error(`Error uploading image for product ${productId}:`, imageError.message);
+          // Don't throw - product is created, just without image
+        }
+      } else if (item.image) {
+        console.warn(`Invalid image URL for product ${productId}: ${item.image} (must start with https://)`);
+      }
       
       return {
-        productId: result.product.id,
+        productId: productId,
         variantId: `gid://shopify/ProductVariant/${variantId}`,
         quantity: item.quantity
       };
