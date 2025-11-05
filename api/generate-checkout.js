@@ -1,4 +1,4 @@
-// FINAL CORRECTED CODE - v4.4
+// FINAL CORRECTED CODE - v4.5
 export default async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -20,8 +20,8 @@ export default async function handler(req, res) {
     const { items, currency } = req.body;
     console.log('Request body:', JSON.stringify(req.body, null, 2));
     
-    // STEP 1: First, ensure the product has proper options configured
-    console.log('Checking product configuration...');
+    // STEP 1: Get current product state
+    console.log('Fetching product configuration...');
     const productResponse = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}.json`, {
       method: 'GET',
       headers: {
@@ -30,58 +30,85 @@ export default async function handler(req, res) {
       },
     });
     
+    if (!productResponse.ok) {
+      throw new Error('Failed to fetch product');
+    }
+    
     const productData = await productResponse.json();
-    console.log('Current product options:', JSON.stringify(productData.product?.options, null, 2));
+    console.log('Current product state:', JSON.stringify({
+      options: productData.product?.options,
+      variants: productData.product?.variants?.length
+    }, null, 2));
     
-    // Check if product needs option configuration
-    const hasProperOptions = productData.product?.options?.some(opt => opt.name !== 'Title');
+    // STEP 2: Ensure product has proper variant structure
+    const currentOptions = productData.product?.options || [];
+    const hasDefaultTitleOnly = currentOptions.length === 1 && currentOptions[0].name === 'Title';
+    const hasNoOptions = currentOptions.length === 0;
     
-    if (!hasProperOptions) {
-      console.log('Product needs option configuration. Updating product...');
+    if (hasDefaultTitleOnly || hasNoOptions) {
+      console.log('Product needs proper variant structure. Updating...');
       
-      // Update product to have a custom option
+      // Get the existing variant ID if it exists (to preserve it)
+      const existingVariantId = productData.product?.variants?.[0]?.id;
+      
+      const productUpdatePayload = {
+        product: {
+          id: parseInt(TEMPLATE_PRODUCT_ID),
+          options: [
+            {
+              name: 'Item',
+              position: 1
+            }
+          ]
+        }
+      };
+      
+      // If there's an existing variant, update it to use the new option
+      if (existingVariantId) {
+        productUpdatePayload.product.variants = [
+          {
+            id: existingVariantId,
+            option1: 'Default'
+          }
+        ];
+      }
+      
       const updateResponse = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}.json`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
         },
-        body: JSON.stringify({
-          product: {
-            id: parseInt(TEMPLATE_PRODUCT_ID),
-            options: [
-              {
-                name: 'Style',
-                values: ['Default']
-              }
-            ]
-          }
-        }),
+        body: JSON.stringify(productUpdatePayload),
       });
       
       const updateResult = await updateResponse.json();
-      console.log('Product update result:', JSON.stringify(updateResult, null, 2));
+      console.log('Product structure update result:', JSON.stringify(updateResult, null, 2));
       
       if (!updateResponse.ok) {
-        throw new Error('Failed to configure product options');
+        console.error('Failed to update product structure:', JSON.stringify(updateResult, null, 2));
+        throw new Error('Failed to configure product for variants');
       }
+      
+      // Wait a moment for Shopify to process the update
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
     
-    // STEP 2: Create variants using REST API
+    // STEP 3: Create variants for each cart item
     const variantCreationPromises = items.map(async (item, index) => {
-      // Generate a truly unique variant title
+      // Generate unique option value
       const timestamp = Date.now();
       const random = Math.random().toString(36).substring(2, 8);
-      const uniqueVariantTitle = `${item.title.substring(0, 50)}-${timestamp}-${random}`;
+      const uniqueOption = `${item.title.substring(0, 40)}-${timestamp}-${random}`;
       
       const variantData = {
         variant: {
-          product_id: parseInt(TEMPLATE_PRODUCT_ID),
-          option1: uniqueVariantTitle, // This is the key - use option1 instead of title
+          option1: uniqueOption,
           price: item.price.toString(),
           inventory_policy: 'deny',
           inventory_management: null,
           requires_shipping: true,
+          taxable: true
         }
       };
       
@@ -99,12 +126,19 @@ export default async function handler(req, res) {
       const result = await response.json();
       
       if (!response.ok || !result.variant?.id) {
-        console.error(`Failed to create variant ${index}. Status: ${response.status}. Shopify Response:`, JSON.stringify(result, null, 2));
-        const errorMessage = result.errors?.base ? result.errors.base.join(', ') : JSON.stringify(result.errors || 'Unknown error');
+        console.error(`Failed to create variant ${index}. Status: ${response.status}`);
+        console.error('Full response:', JSON.stringify(result, null, 2));
+        
+        const errorMessage = result.errors?.base 
+          ? result.errors.base.join(', ') 
+          : result.errors 
+            ? JSON.stringify(result.errors) 
+            : 'Unknown error';
+        
         throw new Error(`Failed to create variant: ${errorMessage}`);
       }
       
-      console.log(`Successfully created variant ${index}:`, result.variant.id);
+      console.log(`Successfully created variant ${index}: ID ${result.variant.id}`);
       
       return {
         variantId: `gid://shopify/ProductVariant/${result.variant.id}`,
@@ -113,9 +147,9 @@ export default async function handler(req, res) {
     });
     
     const lineItems = await Promise.all(variantCreationPromises);
-    console.log('Created variants:', JSON.stringify(lineItems, null, 2));
+    console.log('All variants created successfully:', JSON.stringify(lineItems, null, 2));
     
-    // STEP 3: Create draft order using GraphQL
+    // STEP 4: Create draft order using GraphQL
     const draftOrderMutation = `
       mutation draftOrderCreate($input: DraftOrderInput!) {
         draftOrderCreate(input: $input) {
@@ -130,6 +164,8 @@ export default async function handler(req, res) {
         }
       }
     `;
+    
+    console.log('Creating draft order with line items:', JSON.stringify(lineItems, null, 2));
     
     const draftOrderResponse = await fetch(shopifyGraphQLEndpoint, {
       method: 'POST',
@@ -154,19 +190,25 @@ export default async function handler(req, res) {
     const data = draftOrderResult.data?.draftOrderCreate;
     
     if (data?.userErrors && data.userErrors.length > 0) {
-      console.error("Draft order user errors:", JSON.stringify(data.userErrors, null, 2));
+      console.error("Draft order user errors:", data.userErrors);
       throw new Error(`Shopify validation error: ${data.userErrors[0].message}`);
     }
     
     if (data?.draftOrder?.invoiceUrl) {
+      console.log('SUCCESS! Checkout URL generated:', data.draftOrder.invoiceUrl);
       return res.status(200).json({ checkoutUrl: data.draftOrder.invoiceUrl });
     } else {
-      console.error("Failed to create draft order. Shopify Response:", JSON.stringify(draftOrderResult, null, 2));
-      throw new Error('Could not create the final draft order. Check server logs.');
+      console.error("No invoice URL in response:", JSON.stringify(draftOrderResult, null, 2));
+      throw new Error('Could not create the draft order checkout URL.');
     }
+    
   } catch (error) {
-    console.error("--- A critical server error occurred ---", error.message);
-    console.error("Full error stack:", error.stack);
-    return res.status(500).json({ error: error.message || 'Internal Server Error' });
+    console.error("=== CRITICAL ERROR ===");
+    console.error("Message:", error.message);
+    console.error("Stack:", error.stack);
+    return res.status(500).json({ 
+      error: error.message || 'Internal Server Error',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 }
