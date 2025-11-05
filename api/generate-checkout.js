@@ -1,4 +1,4 @@
-// FINAL CORRECTED CODE - v4.6
+// CORRECTED CODE - v4.7 - Currency & Multi-Product Fix
 export default async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -7,18 +7,57 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') { return res.status(200).end(); }
   if (req.method !== 'POST') { return res.status(405).json({ error: 'Method Not Allowed' }); }
   
-  const { MASTER_STORE_DOMAIN, ADMIN_API_ACCESS_TOKEN, TEMPLATE_PRODUCT_ID } = process.env;
+  const { MASTER_STORE_DOMAIN, ADMIN_API_ACCESS_TOKEN, TEMPLATE_PRODUCT_ID, STORE_BASE_CURRENCY } = process.env;
   if (!MASTER_STORE_DOMAIN || !ADMIN_API_ACCESS_TOKEN || !TEMPLATE_PRODUCT_ID) {
       console.error("CRITICAL: Missing environment variables!");
       return res.status(500).json({ error: "Server configuration error." });
   }
   
+  // Default to EUR if not specified
+  const baseCurrency = STORE_BASE_CURRENCY || 'EUR';
+  
   const shopifyRestEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/2024-10`;
   const shopifyGraphQLEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/2024-10/graphql.json`;
+  
+  // Exchange rates (update these regularly or use an API)
+  const exchangeRates = {
+    'EUR': 1.0,
+    'GBP': 1.17,  // 1 GBP = 1.17 EUR (example rate)
+    'USD': 0.92,  // 1 USD = 0.92 EUR (example rate)
+    // Add more currencies as needed
+  };
+  
+  // Helper function to convert price to base currency (EUR)
+  function convertToBaseCurrency(price, fromCurrency) {
+    if (fromCurrency === baseCurrency) {
+      return price;
+    }
+    
+    const rate = exchangeRates[fromCurrency];
+    if (!rate) {
+      console.warn(`No exchange rate for ${fromCurrency}, using original price`);
+      return price;
+    }
+    
+    // Convert to EUR
+    const convertedPrice = price * rate;
+    console.log(`Converted ${price} ${fromCurrency} to ${convertedPrice.toFixed(2)} ${baseCurrency}`);
+    return convertedPrice;
+  }
   
   try {
     const { items, currency } = req.body;
     console.log('Request body:', JSON.stringify(req.body, null, 2));
+    
+    // Convert all prices to base currency
+    const convertedItems = items.map(item => ({
+      ...item,
+      originalPrice: item.price,
+      originalCurrency: currency,
+      price: convertToBaseCurrency(item.price, currency)
+    }));
+    
+    console.log('Converted items:', JSON.stringify(convertedItems, null, 2));
     
     // STEP 1: Get current product state
     console.log('Fetching product configuration...');
@@ -57,7 +96,7 @@ export default async function handler(req, res) {
       // STRATEGY A: Product has variants - create new variants for each item
       console.log('Creating variants for cart items...');
       
-      const variantCreationPromises = items.map(async (item, index) => {
+      const variantCreationPromises = convertedItems.map(async (item, index) => {
         const timestamp = Date.now();
         const random = Math.random().toString(36).substring(2, 8);
         const uniqueOption = `${item.title.substring(0, 40)}-${timestamp}-${random}`;
@@ -65,7 +104,7 @@ export default async function handler(req, res) {
         const variantData = {
           variant: {
             option1: uniqueOption,
-            price: item.price.toString(),
+            price: item.price.toFixed(2), // Use converted price
             inventory_policy: 'deny',
             inventory_management: null,
             requires_shipping: true,
@@ -97,9 +136,15 @@ export default async function handler(req, res) {
         
         console.log(`Successfully created variant ${index}: ID ${result.variant.id}`);
         
+        // Add line item with custom properties to track original product info
         return {
           variantId: `gid://shopify/ProductVariant/${result.variant.id}`,
-          quantity: item.quantity
+          quantity: item.quantity,
+          customAttributes: [
+            { key: "_original_product", value: item.title },
+            { key: "_original_price", value: `${item.originalPrice} ${item.originalCurrency}` },
+            { key: "_base_price", value: `${item.price.toFixed(2)} ${baseCurrency}` }
+          ]
         };
       });
       
@@ -110,7 +155,7 @@ export default async function handler(req, res) {
       console.log('Updating product details (no variant creation)...');
       
       // For single-item carts, update the product
-      const firstItem = items[0];
+      const firstItem = convertedItems[0];
       
       const productUpdatePayload = {
         product: {
@@ -129,13 +174,13 @@ export default async function handler(req, res) {
         ];
       }
       
-      // Update the existing variant's price
+      // Update the existing variant's price (use converted price)
       if (product.variants && product.variants.length > 0) {
         const existingVariantId = product.variants[0].id;
         productUpdatePayload.product.variants = [
           {
             id: existingVariantId,
-            price: firstItem.price.toString(),
+            price: firstItem.price.toFixed(2), // Use converted price
             inventory_policy: 'deny',
             inventory_management: null
           }
@@ -164,12 +209,17 @@ export default async function handler(req, res) {
       
       // Use the existing variant for all items
       const variantId = updateResult.product.variants[0].id;
-      const totalQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
+      const totalQuantity = convertedItems.reduce((sum, item) => sum + item.quantity, 0);
       
       lineItems = [
         {
           variantId: `gid://shopify/ProductVariant/${variantId}`,
-          quantity: totalQuantity
+          quantity: totalQuantity,
+          customAttributes: [
+            { key: "_original_product", value: firstItem.title },
+            { key: "_original_price", value: `${firstItem.originalPrice} ${firstItem.originalCurrency}` },
+            { key: "_base_price", value: `${firstItem.price.toFixed(2)} ${baseCurrency}` }
+          ]
         }
       ];
     }
@@ -203,7 +253,8 @@ export default async function handler(req, res) {
         variables: { 
           input: { 
             lineItems: lineItems,
-            presentmentCurrencyCode: currency 
+            // Use base currency for the draft order
+            presentmentCurrencyCode: baseCurrency
           } 
         }, 
       }),
