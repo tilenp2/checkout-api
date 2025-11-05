@@ -21,44 +21,38 @@ export default async function handler(req, res) {
     console.log('Request body:', JSON.stringify(req.body, null, 2));
     console.log(`Creating ${items.length} new product(s)...`);
     
-    // STEP 1: Create a product for each unique item
+    // STEP 1: Create products and upload images in parallel
     const productCreationPromises = items.map(async (item, index) => {
       const timestamp = Date.now();
-      const random = Math.random().toString(36).substring(2, 8);
+      const random = Math.random().toString(36).substring(2, 6); // Shorter random
+      
+      // Prepare image URL once
+      let imageUrl = null;
+      if (item.image) {
+        imageUrl = item.image;
+        if (!imageUrl.startsWith('http://') && !imageUrl.startsWith('https://')) {
+          imageUrl = `https:${imageUrl.replace(/^\/+/, '')}`;
+        }
+      }
       
       const productData = {
         product: {
           title: item.title,
-          body_html: item.description || `Product: ${item.title}`,
-          vendor: "Dynamic Cart",
-          product_type: "Cart Item",
+          body_html: item.description || '',
+          vendor: "Cart",
+          product_type: "Item",
           status: "active",
           published: false,
-          variants: [
-            {
-              price: item.price.toString(),
-              inventory_policy: 'deny',
-              inventory_management: null,
-              requires_shipping: true,
-              sku: `CART-${timestamp}-${random}`
-            }
-          ],
-          options: [
-            {
-              name: "Title",
-              values: ["Default Title"]
-            }
-          ]
+          variants: [{
+            price: item.price.toString(),
+            inventory_policy: 'deny',
+            inventory_management: null,
+            sku: `C-${timestamp}-${random}`
+          }]
         }
       };
       
-      console.log(`Creating product ${index + 1}:`, JSON.stringify({
-        title: productData.product.title,
-        price: productData.product.variants[0].price,
-        image: item.image || 'none'
-      }, null, 2));
-      
-      // Create product first
+      // Create product
       const response = await fetch(`${shopifyRestEndpoint}/products.json`, {
         method: 'POST',
         headers: {
@@ -71,64 +65,22 @@ export default async function handler(req, res) {
       const result = await response.json();
       
       if (!response.ok || !result.product?.id) {
-        console.error(`Failed to create product ${index + 1}:`, JSON.stringify(result, null, 2));
         throw new Error(`Failed to create product: ${JSON.stringify(result.errors)}`);
       }
       
       const productId = result.product.id;
       const variantId = result.product.variants[0].id;
-      console.log(`Successfully created product ${index + 1}: Product ID ${productId}, Variant ID ${variantId}`);
       
-      // Add image separately after product creation (more reliable)
-      if (item.image) {
-        // Ensure it's a full URL
-        let imageUrl = item.image;
-        
-        // If it's not a full URL, construct it
-        if (!imageUrl.startsWith('http://') && !imageUrl.startsWith('https://')) {
-          // Remove leading slashes
-          imageUrl = imageUrl.replace(/^\/+/, '');
-          // Construct full Shopify CDN URL
-          imageUrl = `https:${imageUrl}`;
-        }
-        
-        console.log(`Image provided for product ${productId}: ${imageUrl} (original: ${item.image})`);
-        
-        console.log(`Uploading image for product ${productId}...`);
-        try {
-          const imagePayload = {
-            image: {
-              src: imageUrl
-            }
-          };
-          
-          console.log(`Image payload:`, JSON.stringify(imagePayload, null, 2));
-          
-          const imageResponse = await fetch(`${shopifyRestEndpoint}/products/${productId}/images.json`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
-            },
-            body: JSON.stringify(imagePayload),
-          });
-          
-          const imageResult = await imageResponse.json();
-          
-          console.log(`Image upload response status: ${imageResponse.status}`);
-          console.log(`Image upload response:`, JSON.stringify(imageResult, null, 2));
-          
-          if (imageResponse.ok && imageResult.image?.id) {
-            console.log(`✅ Image uploaded successfully for product ${productId}, Image ID: ${imageResult.image.id}`);
-          } else {
-            console.error(`❌ Failed to upload image for product ${productId}:`, JSON.stringify(imageResult, null, 2));
-          }
-        } catch (imageError) {
-          console.error(`❌ Error uploading image for product ${productId}:`, imageError.message);
-          console.error(`Image error stack:`, imageError.stack);
-        }
-      } else {
-        console.log(`No image provided for product ${productId}`);
+      // Upload image in parallel (don't await)
+      if (imageUrl) {
+        fetch(`${shopifyRestEndpoint}/products/${productId}/images.json`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
+          },
+          body: JSON.stringify({ image: { src: imageUrl } }),
+        }).catch(err => console.error(`Image upload failed for ${productId}`));
       }
       
       return {
