@@ -1,4 +1,4 @@
-// FINAL ROBUST VERSION - v3.0
+// FINAL CORRECTED CODE - v4.0
 
 export default async function handler(req, res) {
   // CORS Headers
@@ -11,7 +11,7 @@ export default async function handler(req, res) {
   const { MASTER_STORE_DOMAIN, ADMIN_API_ACCESS_TOKEN, TEMPLATE_PRODUCT_ID } = process.env;
 
   if (!MASTER_STORE_DOMAIN || !ADMIN_API_ACCESS_TOKEN || !TEMPLATE_PRODUCT_ID) {
-      console.error("CRITICAL: Missing one or more environment variables!");
+      console.error("CRITICAL: Missing environment variables!");
       return res.status(500).json({ error: "Server configuration error." });
   }
 
@@ -19,13 +19,8 @@ export default async function handler(req, res) {
 
   try {
     const { items, currency } = req.body;
-    console.log("--- New Request ---");
-    console.log("Received payload with item count:", items.length);
 
-    // --- STEP 1: CREATE VARIANTS ---
     const variantCreationPromises = items.map((item, index) => {
-      // Defensive coding: Ensure a unique variant title to prevent Shopify errors.
-      // We combine the original title with a timestamp and index.
       const uniqueVariantTitle = (item.title.replace(item.product_title || item.title, '').trim() || `Item ${index + 1}`) + `-${Date.now()}`;
       
       const variantInput = {
@@ -36,16 +31,15 @@ export default async function handler(req, res) {
         inventoryPolicy: 'DENY',
       };
       
+      // --- THIS IS THE CORRECTED GRAPHQL MUTATION ---
       const mutation = `
-        mutation productVariantCreate($input: ProductVariantInput!) {
+        mutation($input: ProductVariantInput!) {
           productVariantCreate(input: $input) {
             productVariant { id }
             userErrors { field message }
           }
         }
       `;
-      
-      console.log(`Preparing to create variant ${index}:`, { price: variantInput.price, title: variantInput.title });
       
       return fetch(shopifyGraphQLEndpoint, {
         method: 'POST',
@@ -54,14 +48,7 @@ export default async function handler(req, res) {
           'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
         },
         body: JSON.stringify({ query: mutation, variables: { input: variantInput } }),
-      }).then(response => {
-          if (!response.ok) {
-              return response.text().then(text => { 
-                  throw new Error(`Shopify API Error (Variant Create): Status ${response.status} - ${text}`);
-              });
-          }
-          return response.json();
-      });
+      }).then(response => response.json());
     });
 
     const variantResults = await Promise.all(variantCreationPromises);
@@ -72,13 +59,12 @@ export default async function handler(req, res) {
         console.error(`Failed to create variant ${index}. Shopify Response:`, JSON.stringify(result, null, 2));
         throw new Error('A product variant could not be created. Check the server logs for details.');
       }
-      console.log(`Successfully created variant ${index}: ${variant.id}`);
       return { variantId: variant.id, quantity: items[index].quantity };
     });
     
-    // --- STEP 2: CREATE DRAFT ORDER ---
+    // --- THIS IS THE CORRECTED DRAFT ORDER MUTATION ---
     const draftOrderMutation = `
-      mutation draftOrderCreate($input: DraftOrderInput!) {
+      mutation($input: DraftOrderInput!) {
         draftOrderCreate(input: $input) {
           draftOrder { invoiceUrl }
           userErrors { field message }
@@ -92,16 +78,10 @@ export default async function handler(req, res) {
       body: JSON.stringify({ query: draftOrderMutation, variables: { input: { lineItems, currencyCode: currency } }, }),
     });
 
-    if (!draftOrderResponse.ok) {
-        const text = await draftOrderResponse.text();
-        throw new Error(`Shopify API Error (Draft Order Create): Status ${draftOrderResponse.status} - ${text}`);
-    }
-
     const draftOrderResult = await draftOrderResponse.json();
     const data = draftOrderResult.data?.draftOrderCreate;
 
     if (data?.draftOrder?.invoiceUrl) {
-      console.log("--- Success! ---");
       return res.status(200).json({ checkoutUrl: data.draftOrder.invoiceUrl });
     } else {
       console.error("Failed to create draft order. Shopify Response:", JSON.stringify(draftOrderResult, null, 2));
