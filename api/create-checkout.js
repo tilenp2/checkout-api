@@ -15,7 +15,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Server configuration error." });
   }
 
-  const shopifyGraphQLEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/2024-04/graphql.json`;
+  const shopifyGraphQLEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/2025-10/graphql.json`;
 
   try {
     const { items, currency } = req.body;
@@ -98,3 +98,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Internal Server Error' });
   }
 }
+
