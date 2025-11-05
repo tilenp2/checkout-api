@@ -80,35 +80,49 @@ export default async function handler(req, res) {
       console.log(`Successfully created product ${index + 1}: Product ID ${productId}, Variant ID ${variantId}`);
       
       // Add image separately after product creation (more reliable)
-      if (item.image && item.image.startsWith('https://')) {
-        console.log(`Uploading image for product ${productId}...`);
-        try {
-          const imageResponse = await fetch(`${shopifyRestEndpoint}/products/${productId}/images.json`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
-            },
-            body: JSON.stringify({
+      if (item.image) {
+        console.log(`Image provided for product ${productId}: ${item.image}`);
+        console.log(`Image URL validation: starts with https:// = ${item.image.startsWith('https://')}`);
+        
+        if (item.image.startsWith('https://') || item.image.startsWith('http://')) {
+          console.log(`Uploading image for product ${productId}...`);
+          try {
+            const imagePayload = {
               image: {
                 src: item.image
               }
-            }),
-          });
-          
-          const imageResult = await imageResponse.json();
-          
-          if (imageResponse.ok && imageResult.image?.id) {
-            console.log(`Image uploaded successfully for product ${productId}`);
-          } else {
-            console.error(`Failed to upload image for product ${productId}:`, JSON.stringify(imageResult, null, 2));
+            };
+            
+            console.log(`Image payload:`, JSON.stringify(imagePayload, null, 2));
+            
+            const imageResponse = await fetch(`${shopifyRestEndpoint}/products/${productId}/images.json`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
+              },
+              body: JSON.stringify(imagePayload),
+            });
+            
+            const imageResult = await imageResponse.json();
+            
+            console.log(`Image upload response status: ${imageResponse.status}`);
+            console.log(`Image upload response:`, JSON.stringify(imageResult, null, 2));
+            
+            if (imageResponse.ok && imageResult.image?.id) {
+              console.log(`✅ Image uploaded successfully for product ${productId}, Image ID: ${imageResult.image.id}`);
+            } else {
+              console.error(`❌ Failed to upload image for product ${productId}:`, JSON.stringify(imageResult, null, 2));
+            }
+          } catch (imageError) {
+            console.error(`❌ Error uploading image for product ${productId}:`, imageError.message);
+            console.error(`Image error stack:`, imageError.stack);
           }
-        } catch (imageError) {
-          console.error(`Error uploading image for product ${productId}:`, imageError.message);
-          // Don't throw - product is created, just without image
+        } else {
+          console.warn(`⚠️ Invalid image URL for product ${productId}: ${item.image} (must start with http:// or https://)`);
         }
-      } else if (item.image) {
-        console.warn(`Invalid image URL for product ${productId}: ${item.image} (must start with https://)`);
+      } else {
+        console.log(`No image provided for product ${productId}`);
       }
       
       return {
