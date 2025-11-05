@@ -1,4 +1,4 @@
-// FINAL CORRECTED CODE - v4.2
+// FINAL CORRECTED CODE - v4.3
 export default async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -22,22 +22,23 @@ export default async function handler(req, res) {
     
     // Create variants using REST API (more reliable for individual variants)
     const variantCreationPromises = items.map(async (item, index) => {
-      const uniqueVariantTitle = (item.title.replace(item.product_title || item.title, '').trim() || `Item ${index + 1}`) + `-${Date.now()}-${index}`;
+      // Generate a truly unique variant title
+      const timestamp = Date.now();
+      const random = Math.random().toString(36).substring(2, 8);
+      const uniqueVariantTitle = `${item.title}-${timestamp}-${random}`;
       
       const variantData = {
         variant: {
-          product_id: TEMPLATE_PRODUCT_ID,
+          product_id: parseInt(TEMPLATE_PRODUCT_ID),
           title: uniqueVariantTitle,
-          price: item.price,
+          price: item.price.toString(),
           inventory_policy: 'deny',
           inventory_management: null,
+          requires_shipping: true,
         }
       };
       
-      // Add image if exists
-      if (item.image) {
-        variantData.variant.image_src = item.image;
-      }
+      console.log(`Creating variant ${index}:`, JSON.stringify(variantData, null, 2));
       
       const response = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}/variants.json`, {
         method: 'POST',
@@ -51,9 +52,12 @@ export default async function handler(req, res) {
       const result = await response.json();
       
       if (!response.ok || !result.variant?.id) {
-        console.error(`Failed to create variant ${index}. Shopify Response:`, JSON.stringify(result, null, 2));
-        throw new Error(`Failed to create variant: ${result.errors || 'Unknown error'}`);
+        console.error(`Failed to create variant ${index}. Status: ${response.status}. Shopify Response:`, JSON.stringify(result, null, 2));
+        const errorMessage = result.errors?.base ? result.errors.base.join(', ') : JSON.stringify(result.errors || 'Unknown error');
+        throw new Error(`Failed to create variant: ${errorMessage}`);
       }
+      
+      console.log(`Successfully created variant ${index}:`, result.variant.id);
       
       return {
         variantId: `gid://shopify/ProductVariant/${result.variant.id}`,
@@ -115,7 +119,7 @@ export default async function handler(req, res) {
     }
   } catch (error) {
     console.error("--- A critical server error occurred ---", error.message);
-    console.error("Full error:", error);
+    console.error("Full error stack:", error.stack);
     return res.status(500).json({ error: error.message || 'Internal Server Error' });
   }
 }
