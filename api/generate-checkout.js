@@ -1,4 +1,4 @@
-// FINAL CORRECTED CODE - v4.3
+// FINAL CORRECTED CODE - v4.4
 export default async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -20,17 +20,64 @@ export default async function handler(req, res) {
     const { items, currency } = req.body;
     console.log('Request body:', JSON.stringify(req.body, null, 2));
     
-    // Create variants using REST API (more reliable for individual variants)
+    // STEP 1: First, ensure the product has proper options configured
+    console.log('Checking product configuration...');
+    const productResponse = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}.json`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
+      },
+    });
+    
+    const productData = await productResponse.json();
+    console.log('Current product options:', JSON.stringify(productData.product?.options, null, 2));
+    
+    // Check if product needs option configuration
+    const hasProperOptions = productData.product?.options?.some(opt => opt.name !== 'Title');
+    
+    if (!hasProperOptions) {
+      console.log('Product needs option configuration. Updating product...');
+      
+      // Update product to have a custom option
+      const updateResponse = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}.json`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
+        },
+        body: JSON.stringify({
+          product: {
+            id: parseInt(TEMPLATE_PRODUCT_ID),
+            options: [
+              {
+                name: 'Style',
+                values: ['Default']
+              }
+            ]
+          }
+        }),
+      });
+      
+      const updateResult = await updateResponse.json();
+      console.log('Product update result:', JSON.stringify(updateResult, null, 2));
+      
+      if (!updateResponse.ok) {
+        throw new Error('Failed to configure product options');
+      }
+    }
+    
+    // STEP 2: Create variants using REST API
     const variantCreationPromises = items.map(async (item, index) => {
       // Generate a truly unique variant title
       const timestamp = Date.now();
       const random = Math.random().toString(36).substring(2, 8);
-      const uniqueVariantTitle = `${item.title}-${timestamp}-${random}`;
+      const uniqueVariantTitle = `${item.title.substring(0, 50)}-${timestamp}-${random}`;
       
       const variantData = {
         variant: {
           product_id: parseInt(TEMPLATE_PRODUCT_ID),
-          title: uniqueVariantTitle,
+          option1: uniqueVariantTitle, // This is the key - use option1 instead of title
           price: item.price.toString(),
           inventory_policy: 'deny',
           inventory_management: null,
@@ -68,7 +115,7 @@ export default async function handler(req, res) {
     const lineItems = await Promise.all(variantCreationPromises);
     console.log('Created variants:', JSON.stringify(lineItems, null, 2));
     
-    // Create draft order using GraphQL
+    // STEP 3: Create draft order using GraphQL
     const draftOrderMutation = `
       mutation draftOrderCreate($input: DraftOrderInput!) {
         draftOrderCreate(input: $input) {
