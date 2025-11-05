@@ -81,45 +81,51 @@ export default async function handler(req, res) {
       
       // Add image separately after product creation (more reliable)
       if (item.image) {
-        console.log(`Image provided for product ${productId}: ${item.image}`);
-        console.log(`Image URL validation: starts with https:// = ${item.image.startsWith('https://')}`);
+        // Ensure it's a full URL
+        let imageUrl = item.image;
         
-        if (item.image.startsWith('https://') || item.image.startsWith('http://')) {
-          console.log(`Uploading image for product ${productId}...`);
-          try {
-            const imagePayload = {
-              image: {
-                src: item.image
-              }
-            };
-            
-            console.log(`Image payload:`, JSON.stringify(imagePayload, null, 2));
-            
-            const imageResponse = await fetch(`${shopifyRestEndpoint}/products/${productId}/images.json`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
-              },
-              body: JSON.stringify(imagePayload),
-            });
-            
-            const imageResult = await imageResponse.json();
-            
-            console.log(`Image upload response status: ${imageResponse.status}`);
-            console.log(`Image upload response:`, JSON.stringify(imageResult, null, 2));
-            
-            if (imageResponse.ok && imageResult.image?.id) {
-              console.log(`✅ Image uploaded successfully for product ${productId}, Image ID: ${imageResult.image.id}`);
-            } else {
-              console.error(`❌ Failed to upload image for product ${productId}:`, JSON.stringify(imageResult, null, 2));
+        // If it's not a full URL, construct it
+        if (!imageUrl.startsWith('http://') && !imageUrl.startsWith('https://')) {
+          // Remove leading slashes
+          imageUrl = imageUrl.replace(/^\/+/, '');
+          // Construct full Shopify CDN URL
+          imageUrl = `https:${imageUrl}`;
+        }
+        
+        console.log(`Image provided for product ${productId}: ${imageUrl} (original: ${item.image})`);
+        
+        console.log(`Uploading image for product ${productId}...`);
+        try {
+          const imagePayload = {
+            image: {
+              src: imageUrl
             }
-          } catch (imageError) {
-            console.error(`❌ Error uploading image for product ${productId}:`, imageError.message);
-            console.error(`Image error stack:`, imageError.stack);
+          };
+          
+          console.log(`Image payload:`, JSON.stringify(imagePayload, null, 2));
+          
+          const imageResponse = await fetch(`${shopifyRestEndpoint}/products/${productId}/images.json`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
+            },
+            body: JSON.stringify(imagePayload),
+          });
+          
+          const imageResult = await imageResponse.json();
+          
+          console.log(`Image upload response status: ${imageResponse.status}`);
+          console.log(`Image upload response:`, JSON.stringify(imageResult, null, 2));
+          
+          if (imageResponse.ok && imageResult.image?.id) {
+            console.log(`✅ Image uploaded successfully for product ${productId}, Image ID: ${imageResult.image.id}`);
+          } else {
+            console.error(`❌ Failed to upload image for product ${productId}:`, JSON.stringify(imageResult, null, 2));
           }
-        } else {
-          console.warn(`⚠️ Invalid image URL for product ${productId}: ${item.image} (must start with http:// or https://)`);
+        } catch (imageError) {
+          console.error(`❌ Error uploading image for product ${productId}:`, imageError.message);
+          console.error(`Image error stack:`, imageError.stack);
         }
       } else {
         console.log(`No image provided for product ${productId}`);
