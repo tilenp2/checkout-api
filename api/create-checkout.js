@@ -1,10 +1,10 @@
-const { Shopify } = require('@shopify/shopify-api');
+// FINAL - Direct API Call Method (No Libraries)
 
 export default async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Shopify-Access-Token');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -13,19 +13,30 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
+  // Check for environment variables
   if (!process.env.MASTER_STORE_DOMAIN || !process.env.ADMIN_API_ACCESS_TOKEN) {
       console.error("CRITICAL: Missing environment variables!");
       return res.status(500).json({ error: "Server configuration error." });
   }
 
-  try {
-    const client = new Shopify.Clients.Graphql({
-      session: {
-        shop: process.env.MASTER_STORE_DOMAIN,
-        accessToken: process.env.ADMIN_API_ACCESS_TOKEN,
-      },
-    });
+  // --- Direct API Call Logic ---
+  const shopifyGraphQLEndpoint = `https://${process.env.MASTER_STORE_DOMAIN}/admin/api/2024-04/graphql.json`;
 
+  const draftOrderMutation = `
+    mutation draftOrderCreate($input: DraftOrderInput!) {
+      draftOrderCreate(input: $input) {
+        draftOrder {
+          invoiceUrl
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  try {
     const { items } = req.body;
     const lineItems = items.map(item => ({
       title: item.title,
@@ -33,31 +44,36 @@ export default async function handler(req, res) {
       quantity: item.quantity,
       requiresShipping: true,
     }));
-    
-    const result = await client.query({
-      data: {
-        query: `
-          mutation draftOrderCreate($input: DraftOrderInput!) {
-            draftOrderCreate(input: $input) {
-              draftOrder { invoiceUrl }
-              userErrors { field message }
-            }
-          }
-        `,
-        variables: { input: { lineItems } },
+
+    const response = await fetch(shopifyGraphQLEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': process.env.ADMIN_API_ACCESS_TOKEN,
       },
+      body: JSON.stringify({
+        query: draftOrderMutation,
+        variables: { input: { lineItems } },
+      }),
     });
 
-    const data = result.body.data.draftOrderCreate;
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Shopify API responded with status ${response.status}: ${errorText}`);
+    }
+
+    const result = await response.json();
+    const data = result.data.draftOrderCreate;
+
     if (data.draftOrder?.invoiceUrl) {
       return res.status(200).json({ checkoutUrl: data.draftOrder.invoiceUrl });
     } else {
-      console.error("Shopify API Error:", data.userErrors);
+      console.error("Shopify GraphQL Error:", data.userErrors);
       return res.status(500).json({ error: 'Could not create checkout from Shopify.', details: data.userErrors });
     }
 
   } catch (error) {
-    console.error("A critical server error occurred:", error);
+    console.error("A critical server error occurred:", error.message);
     return res.status(500).json({ error: 'Internal Server Error' });
   }
 }
