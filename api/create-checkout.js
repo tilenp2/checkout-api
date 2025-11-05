@@ -1,55 +1,63 @@
-// --- TEMPORARY DIAGNOSTIC SCRIPT ---
-// This file will test if Vercel is installing dependencies correctly.
+const { Shopify } = require('@shopify/shopify-api');
 
 export default async function handler(req, res) {
-  // Set CORS headers so we can see the response in the browser console
-  res.setHeader('Access-control-Allow-Origin', '*');
-  res.setHeader('Access-control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') { return res.status(200).end(); }
+  // CORS Headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  let shopifyStatus = 'Not loaded';
-  let shopifyError = null;
-  let uuidStatus = 'Not loaded';
-  let uuidError = null;
-  let uuidValue = null;
-
-  // --- Test 1: Try to load the simple 'uuid' package ---
-  try {
-    const { v4: uuidv4 } = require('uuid');
-    uuidStatus = 'SUCCESSFULLY LOADED';
-    uuidValue = uuidv4();
-  } catch (e) {
-    uuidStatus = 'FAILED TO LOAD!';
-    uuidError = e.message;
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // --- Test 2: Try to load the Shopify package ---
-  try {
-    const { Shopify } = require('@shopify/shopify-api');
-    if (Shopify && Shopify.Clients) {
-        shopifyStatus = 'SUCCESSFULLY LOADED';
-    } else {
-        shopifyStatus = 'Loaded, but the object is invalid or empty.';
-    }
-  } catch (e) {
-    shopifyStatus = 'FAILED TO LOAD!';
-    shopifyError = e.message;
+  if (!process.env.MASTER_STORE_DOMAIN || !process.env.ADMIN_API_ACCESS_TOKEN) {
+      console.error("CRITICAL: Missing environment variables!");
+      return res.status(500).json({ error: "Server configuration error." });
   }
 
-  // Send the diagnostic report back to the browser
-  res.status(200).json({
-    diagnosticReport: {
-      message: "This is a report from the Vercel server's dependency test.",
-      uuidPackage: {
-        status: uuidStatus,
-        error: uuidError,
-        generatedId: uuidValue
+  try {
+    const client = new Shopify.Clients.Graphql({
+      session: {
+        shop: process.env.MASTER_STORE_DOMAIN,
+        accessToken: process.env.ADMIN_API_ACCESS_TOKEN,
       },
-      shopifyPackage: {
-        status: shopifyStatus,
-        error: shopifyError
-      }
+    });
+
+    const { items } = req.body;
+    const lineItems = items.map(item => ({
+      title: item.title,
+      originalUnitPrice: item.price,
+      quantity: item.quantity,
+      requiresShipping: true,
+    }));
+    
+    const result = await client.query({
+      data: {
+        query: `
+          mutation draftOrderCreate($input: DraftOrderInput!) {
+            draftOrderCreate(input: $input) {
+              draftOrder { invoiceUrl }
+              userErrors { field message }
+            }
+          }
+        `,
+        variables: { input: { lineItems } },
+      },
+    });
+
+    const data = result.body.data.draftOrderCreate;
+    if (data.draftOrder?.invoiceUrl) {
+      return res.status(200).json({ checkoutUrl: data.draftOrder.invoiceUrl });
+    } else {
+      console.error("Shopify API Error:", data.userErrors);
+      return res.status(500).json({ error: 'Could not create checkout from Shopify.', details: data.userErrors });
     }
-  });
+
+  } catch (error) {
+    console.error("A critical server error occurred:", error);
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
 }
