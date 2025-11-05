@@ -1,9 +1,0 @@
-{
-  "name": "unified-checkout-api",
-  "version": "1.0.0",
-  "description": "Handles unified checkout for Shopify stores",
-  "private": true,
-  "dependencies": {
-    "@shopify/shopify-api": "^9.3.1"
-  }
-}
