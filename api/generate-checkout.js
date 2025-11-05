@@ -1,4 +1,4 @@
-// FINAL CORRECTED CODE - v4.5
+// FINAL CORRECTED CODE - v4.6
 export default async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -35,43 +35,114 @@ export default async function handler(req, res) {
     }
     
     const productData = await productResponse.json();
+    const product = productData.product;
     console.log('Current product state:', JSON.stringify({
-      options: productData.product?.options,
-      variants: productData.product?.variants?.length
+      title: product.title,
+      options: product.options,
+      variants: product.variants?.length
     }, null, 2));
     
-    // STEP 2: Ensure product has proper variant structure
-    const currentOptions = productData.product?.options || [];
-    const hasDefaultTitleOnly = currentOptions.length === 1 && currentOptions[0].name === 'Title';
-    const hasNoOptions = currentOptions.length === 0;
+    // Check if product has multiple variants (more than just default)
+    const hasMultipleVariants = product.variants && product.variants.length > 1;
+    const hasVariantOptions = product.options && product.options.length > 0 && 
+                              product.options.some(opt => opt.name !== 'Title' && opt.values.length > 1);
     
-    if (hasDefaultTitleOnly || hasNoOptions) {
-      console.log('Product needs proper variant structure. Updating...');
+    const useVariants = hasMultipleVariants || hasVariantOptions;
+    
+    console.log(`Product variant strategy: ${useVariants ? 'CREATE_VARIANTS' : 'UPDATE_PRODUCT'}`);
+    
+    let lineItems = [];
+    
+    if (useVariants) {
+      // STRATEGY A: Product has variants - create new variants for each item
+      console.log('Creating variants for cart items...');
       
-      // Get the existing variant ID if it exists (to preserve it)
-      const existingVariantId = productData.product?.variants?.[0]?.id;
+      const variantCreationPromises = items.map(async (item, index) => {
+        const timestamp = Date.now();
+        const random = Math.random().toString(36).substring(2, 8);
+        const uniqueOption = `${item.title.substring(0, 40)}-${timestamp}-${random}`;
+        
+        const variantData = {
+          variant: {
+            option1: uniqueOption,
+            price: item.price.toString(),
+            inventory_policy: 'deny',
+            inventory_management: null,
+            requires_shipping: true,
+          }
+        };
+        
+        // Add image if provided
+        if (item.image) {
+          variantData.variant.image_src = item.image;
+        }
+        
+        console.log(`Creating variant ${index}:`, JSON.stringify(variantData, null, 2));
+        
+        const response = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}/variants.json`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
+          },
+          body: JSON.stringify(variantData),
+        });
+        
+        const result = await response.json();
+        
+        if (!response.ok || !result.variant?.id) {
+          console.error(`Failed to create variant ${index}:`, JSON.stringify(result, null, 2));
+          throw new Error(`Failed to create variant: ${JSON.stringify(result.errors)}`);
+        }
+        
+        console.log(`Successfully created variant ${index}: ID ${result.variant.id}`);
+        
+        return {
+          variantId: `gid://shopify/ProductVariant/${result.variant.id}`,
+          quantity: item.quantity
+        };
+      });
+      
+      lineItems = await Promise.all(variantCreationPromises);
+      
+    } else {
+      // STRATEGY B: Product has NO variants - update product title/image and use existing variant
+      console.log('Updating product details (no variant creation)...');
+      
+      // For single-item carts, update the product
+      const firstItem = items[0];
       
       const productUpdatePayload = {
         product: {
           id: parseInt(TEMPLATE_PRODUCT_ID),
-          options: [
-            {
-              name: 'Item',
-              position: 1
-            }
-          ]
+          title: firstItem.title,
         }
       };
       
-      // If there's an existing variant, update it to use the new option
-      if (existingVariantId) {
-        productUpdatePayload.product.variants = [
+      // Add image if provided
+      if (firstItem.image) {
+        productUpdatePayload.product.images = [
           {
-            id: existingVariantId,
-            option1: 'Default'
+            src: firstItem.image,
+            position: 1
           }
         ];
       }
+      
+      // Update the existing variant's price
+      if (product.variants && product.variants.length > 0) {
+        const existingVariantId = product.variants[0].id;
+        productUpdatePayload.product.variants = [
+          {
+            id: existingVariantId,
+            price: firstItem.price.toString(),
+            inventory_policy: 'deny',
+            inventory_management: null
+          }
+        ];
+      }
+      
+      console.log('Updating product:', JSON.stringify(productUpdatePayload, null, 2));
       
       const updateResponse = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}.json`, {
         method: 'PUT',
@@ -83,73 +154,29 @@ export default async function handler(req, res) {
       });
       
       const updateResult = await updateResponse.json();
-      console.log('Product structure update result:', JSON.stringify(updateResult, null, 2));
       
       if (!updateResponse.ok) {
-        console.error('Failed to update product structure:', JSON.stringify(updateResult, null, 2));
-        throw new Error('Failed to configure product for variants');
+        console.error('Failed to update product:', JSON.stringify(updateResult, null, 2));
+        throw new Error('Failed to update product details');
       }
       
-      // Wait a moment for Shopify to process the update
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      console.log('Product updated successfully');
+      
+      // Use the existing variant for all items
+      const variantId = updateResult.product.variants[0].id;
+      const totalQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
+      
+      lineItems = [
+        {
+          variantId: `gid://shopify/ProductVariant/${variantId}`,
+          quantity: totalQuantity
+        }
+      ];
     }
     
-    // STEP 3: Create variants for each cart item
-    const variantCreationPromises = items.map(async (item, index) => {
-      // Generate unique option value
-      const timestamp = Date.now();
-      const random = Math.random().toString(36).substring(2, 8);
-      const uniqueOption = `${item.title.substring(0, 40)}-${timestamp}-${random}`;
-      
-      const variantData = {
-        variant: {
-          option1: uniqueOption,
-          price: item.price.toString(),
-          inventory_policy: 'deny',
-          inventory_management: null,
-          requires_shipping: true,
-          taxable: true
-        }
-      };
-      
-      console.log(`Creating variant ${index}:`, JSON.stringify(variantData, null, 2));
-      
-      const response = await fetch(`${shopifyRestEndpoint}/products/${TEMPLATE_PRODUCT_ID}/variants.json`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
-        },
-        body: JSON.stringify(variantData),
-      });
-      
-      const result = await response.json();
-      
-      if (!response.ok || !result.variant?.id) {
-        console.error(`Failed to create variant ${index}. Status: ${response.status}`);
-        console.error('Full response:', JSON.stringify(result, null, 2));
-        
-        const errorMessage = result.errors?.base 
-          ? result.errors.base.join(', ') 
-          : result.errors 
-            ? JSON.stringify(result.errors) 
-            : 'Unknown error';
-        
-        throw new Error(`Failed to create variant: ${errorMessage}`);
-      }
-      
-      console.log(`Successfully created variant ${index}: ID ${result.variant.id}`);
-      
-      return {
-        variantId: `gid://shopify/ProductVariant/${result.variant.id}`,
-        quantity: item.quantity
-      };
-    });
+    console.log('Line items for draft order:', JSON.stringify(lineItems, null, 2));
     
-    const lineItems = await Promise.all(variantCreationPromises);
-    console.log('All variants created successfully:', JSON.stringify(lineItems, null, 2));
-    
-    // STEP 4: Create draft order using GraphQL
+    // STEP 2: Create draft order using GraphQL
     const draftOrderMutation = `
       mutation draftOrderCreate($input: DraftOrderInput!) {
         draftOrderCreate(input: $input) {
@@ -164,8 +191,6 @@ export default async function handler(req, res) {
         }
       }
     `;
-    
-    console.log('Creating draft order with line items:', JSON.stringify(lineItems, null, 2));
     
     const draftOrderResponse = await fetch(shopifyGraphQLEndpoint, {
       method: 'POST',
