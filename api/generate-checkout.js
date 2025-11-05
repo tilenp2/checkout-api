@@ -21,10 +21,10 @@ export default async function handler(req, res) {
     console.log('Request body:', JSON.stringify(req.body, null, 2));
     console.log(`Creating ${items.length} new product(s)...`);
     
-    // STEP 1: Create products and upload images in parallel
+    // STEP 1: Create products and upload images (wait for images to complete)
     const productCreationPromises = items.map(async (item, index) => {
       const timestamp = Date.now();
-      const random = Math.random().toString(36).substring(2, 6); // Shorter random
+      const random = Math.random().toString(36).substring(2, 6);
       
       // Prepare image URL once
       let imageUrl = null;
@@ -71,16 +71,20 @@ export default async function handler(req, res) {
       const productId = result.product.id;
       const variantId = result.product.variants[0].id;
       
-      // Upload image in parallel (don't await)
+      // Upload image and WAIT for completion
       if (imageUrl) {
-        fetch(`${shopifyRestEndpoint}/products/${productId}/images.json`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
-          },
-          body: JSON.stringify({ image: { src: imageUrl } }),
-        }).catch(err => console.error(`Image upload failed for ${productId}`));
+        try {
+          await fetch(`${shopifyRestEndpoint}/products/${productId}/images.json`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
+            },
+            body: JSON.stringify({ image: { src: imageUrl } }),
+          });
+        } catch (err) {
+          console.error(`Image upload failed for ${productId}`);
+        }
       }
       
       return {
@@ -92,26 +96,18 @@ export default async function handler(req, res) {
     
     const createdProducts = await Promise.all(productCreationPromises);
     
-    // STEP 2: Create line items for draft order
+    // STEP 2: Create draft order immediately (don't wait for images)
     const lineItems = createdProducts.map(product => ({
       variantId: product.variantId,
       quantity: product.quantity
     }));
     
-    console.log('Line items for draft order:', JSON.stringify(lineItems, null, 2));
-    
     // STEP 3: Create draft order using GraphQL
     const draftOrderMutation = `
       mutation draftOrderCreate($input: DraftOrderInput!) {
         draftOrderCreate(input: $input) {
-          draftOrder { 
-            id
-            invoiceUrl 
-          }
-          userErrors { 
-            field 
-            message 
-          }
+          draftOrder { id invoiceUrl }
+          userErrors { field message }
         }
       }
     `;
@@ -134,72 +130,37 @@ export default async function handler(req, res) {
     });
     
     const draftOrderResult = await draftOrderResponse.json();
-    console.log('Draft order result:', JSON.stringify(draftOrderResult, null, 2));
-    
     const data = draftOrderResult.data?.draftOrderCreate;
     
     if (data?.userErrors && data.userErrors.length > 0) {
-      console.error("Draft order user errors:", data.userErrors);
-      
       // If draft order fails, clean up created products
-      console.log('Cleaning up created products...');
-      await Promise.all(createdProducts.map(async (product) => {
-        try {
-          await fetch(`${shopifyRestEndpoint}/products/${product.productId}.json`, {
-            method: 'DELETE',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
-            },
-          });
-          console.log(`Deleted product ${product.productId}`);
-        } catch (err) {
-          console.error(`Failed to delete product ${product.productId}:`, err);
-        }
-      }));
-      
-      throw new Error(`Shopify validation error: ${data.userErrors[0].message}`);
+      await Promise.all(createdProducts.map(product =>
+        fetch(`${shopifyRestEndpoint}/products/${product.productId}.json`, {
+          method: 'DELETE',
+          headers: { 'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN },
+        }).catch(() => {})
+      ));
+      throw new Error(`Shopify error: ${data.userErrors[0].message}`);
     }
     
     if (data?.draftOrder?.invoiceUrl) {
-      console.log('SUCCESS! Checkout URL generated:', data.draftOrder.invoiceUrl);
-      console.log(`Created ${createdProducts.length} product(s) for this order`);
-      
-      // Return success with product IDs for potential cleanup later
       return res.status(200).json({ 
         checkoutUrl: data.draftOrder.invoiceUrl,
         productIds: createdProducts.map(p => p.productId)
       });
     } else {
-      console.error("No invoice URL in response:", JSON.stringify(draftOrderResult, null, 2));
-      
       // Clean up created products
-      console.log('Cleaning up created products...');
-      await Promise.all(createdProducts.map(async (product) => {
-        try {
-          await fetch(`${shopifyRestEndpoint}/products/${product.productId}.json`, {
-            method: 'DELETE',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN,
-            },
-          });
-          console.log(`Deleted product ${product.productId}`);
-        } catch (err) {
-          console.error(`Failed to delete product ${product.productId}:`, err);
-        }
-      }));
-      
-      throw new Error('Could not create the draft order checkout URL.');
+      await Promise.all(createdProducts.map(product =>
+        fetch(`${shopifyRestEndpoint}/products/${product.productId}.json`, {
+          method: 'DELETE',
+          headers: { 'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN },
+        }).catch(() => {})
+      ));
+      throw new Error('Could not create checkout URL.');
     }
     
   } catch (error) {
-    console.error("=== CRITICAL ERROR ===");
-    console.error("Message:", error.message);
-    console.error("Stack:", error.stack);
-    return res.status(500).json({ 
-      error: error.message || 'Internal Server Error',
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
+    console.error("Error:", error.message);
+    return res.status(500).json({ error: error.message || 'Internal Server Error' });
   }
 }
