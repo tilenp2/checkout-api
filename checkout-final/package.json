@@ -1,0 +1,8 @@
+{
+  "name": "checkout-final-api",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@shopify/shopify-api": "^9.3.1"
+  }
+}
