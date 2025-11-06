@@ -155,8 +155,17 @@ export default async function handler(req, res) {
     }
     
     if (data?.draftOrder?.invoiceUrl) {
+      let checkoutUrl = data.draftOrder.invoiceUrl;
+      
+      // Append country parameter to URL if country was detected
+      if (country) {
+        const url = new URL(checkoutUrl);
+        url.searchParams.set('country', country);
+        checkoutUrl = url.toString();
+      }
+      
       return res.status(200).json({ 
-        checkoutUrl: data.draftOrder.invoiceUrl,
+        checkoutUrl: checkoutUrl,
         productIds: createdProducts.map(p => p.productId)
       });
     } else {
