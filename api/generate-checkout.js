@@ -1,4 +1,4 @@
-// SIMPLIFIED CODE - v5.2 - Create Products from Scratch with Fixed Image Upload
+// v5.3 - Create Products with Image Upload + Country Detection
 export default async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -17,9 +17,10 @@ export default async function handler(req, res) {
   const shopifyGraphQLEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/2024-10/graphql.json`;
   
   try {
-    const { items, currency } = req.body;
+    const { items, currency, country } = req.body;
     console.log('Request body:', JSON.stringify(req.body, null, 2));
     console.log(`Creating ${items.length} new product(s)...`);
+    if (country) console.log(`Visitor country: ${country}`);
     
     // STEP 1: Create products and upload images (wait for images to complete)
     const productCreationPromises = items.map(async (item, index) => {
@@ -96,11 +97,24 @@ export default async function handler(req, res) {
     
     const createdProducts = await Promise.all(productCreationPromises);
     
-    // STEP 2: Create draft order immediately (don't wait for images)
+    // STEP 2: Create draft order with shipping address
     const lineItems = createdProducts.map(product => ({
       variantId: product.variantId,
       quantity: product.quantity
     }));
+    
+    // Build draft order input with country
+    const draftOrderInput = {
+      lineItems: lineItems,
+      presentmentCurrencyCode: currency
+    };
+    
+    // Add shipping address with country if provided
+    if (country) {
+      draftOrderInput.shippingAddress = {
+        countryCode: country
+      };
+    }
     
     // STEP 3: Create draft order using GraphQL
     const draftOrderMutation = `
@@ -121,10 +135,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({ 
         query: draftOrderMutation, 
         variables: { 
-          input: { 
-            lineItems: lineItems,
-            presentmentCurrencyCode: currency
-          } 
+          input: draftOrderInput
         }, 
       }),
     });
