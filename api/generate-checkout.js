@@ -109,11 +109,11 @@ export default async function handler(req, res) {
       presentmentCurrencyCode: currency
     };
     
-    // Add shipping address with country if provided
+    // CRITICAL: Use marketRegionCountryCode to set the market/country
+    // This determines pricing, shipping options, and checkout locale
     if (country) {
-      draftOrderInput.shippingAddress = {
-        countryCode: country
-      };
+      draftOrderInput.marketRegionCountryCode = country;
+      console.log(`Setting marketRegionCountryCode to: ${country}`);
     }
     
     // STEP 3: Create draft order using GraphQL
@@ -157,11 +157,31 @@ export default async function handler(req, res) {
     if (data?.draftOrder?.invoiceUrl) {
       let checkoutUrl = data.draftOrder.invoiceUrl;
       
-      // Append country parameter to URL if country was detected
+      // Try to modify the URL path to force the correct locale
       if (country) {
-        const url = new URL(checkoutUrl);
-        url.searchParams.set('country', country);
-        checkoutUrl = url.toString();
+        try {
+          const url = new URL(checkoutUrl);
+          
+          // Method 1: Replace /en-us with /en-gb (or appropriate locale)
+          const locale = `en-${country.toLowerCase()}`;
+          const currentPath = url.pathname;
+          
+          // Check if path contains a locale pattern like /en-us/
+          const localePattern = /\/[a-z]{2}-[a-z]{2}\//;
+          if (localePattern.test(currentPath)) {
+            url.pathname = currentPath.replace(localePattern, `/${locale}/`);
+            console.log(`Replaced locale in path: ${currentPath} -> ${url.pathname}`);
+          }
+          
+          // Method 2: Add locale and country as query parameters as backup
+          url.searchParams.set('locale', locale);
+          url.searchParams.set('country', country);
+          
+          checkoutUrl = url.toString();
+          console.log(`Modified checkout URL: ${checkoutUrl}`);
+        } catch (err) {
+          console.error('Failed to modify URL:', err);
+        }
       }
       
       return res.status(200).json({ 
