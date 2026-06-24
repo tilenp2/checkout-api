@@ -1,11 +1,26 @@
 // v5.5 - Create Products with Image Upload + Country Detection (Updated for shpss_ OAuth flow)
 export default async function handler(req, res) {
-  // CORS Headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') { return res.status(200).end(); }
-  if (req.method !== 'POST') { return res.status(405).json({ error: 'Method Not Allowed' }); }
+  // --- BULLETPROOF CORS HEADERS ---
+  // Dynamically allow the exact domain that is making the request
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS, PATCH, DELETE, POST, PUT');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
+  );
+
+  // Handle the OPTIONS preflight request immediately
+  if (req.method === 'OPTIONS') { 
+    return res.status(200).end(); 
+  }
+  
+  // Enforce POST method
+  if (req.method !== 'POST') { 
+    return res.status(405).json({ error: 'Method Not Allowed' }); 
+  }
+  // --------------------------------
   
   // UPDATED: Now using Client ID and Client Secret (shpss_)
   const { MASTER_STORE_DOMAIN, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET } = process.env;
@@ -20,7 +35,7 @@ export default async function handler(req, res) {
   
   try {
     // STEP 1: Exchange shpss_ Client Secret for a temporary Access Token
-    console.log("Requesting temporary access token from Shopify..." );
+    console.log("Requesting temporary access token from Shopify..."  );
     const tokenResponse = await fetch(`https://${MASTER_STORE_DOMAIN}/admin/oauth/access_token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -28,7 +43,7 @@ export default async function handler(req, res) {
         client_id: SHOPIFY_CLIENT_ID,
         client_secret: SHOPIFY_CLIENT_SECRET,
         grant_type: 'client_credentials'
-      } )
+      }  )
     });
 
     const tokenData = await tokenResponse.json();
@@ -53,8 +68,8 @@ export default async function handler(req, res) {
       let imageUrl = null;
       if (item.image) {
         imageUrl = item.image;
-        if (!imageUrl.startsWith('http://' ) && !imageUrl.startsWith('https://' )) {
-          imageUrl = `https:${imageUrl.replace(/^\/+/, '' )}`;
+        if (!imageUrl.startsWith('http://'  ) && !imageUrl.startsWith('https://'  )) {
+          imageUrl = `https:${imageUrl.replace(/^\/+/, ''  )}`;
         }
       }
       
