@@ -1,38 +1,60 @@
-// v5.3 - Create Products with Image Upload + Country Detection
+// v5.5 - Create Products with Image Upload + Country Detection (Updated for shpss_ OAuth flow)
 export default async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Shopify-Access-Token');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { return res.status(200).end(); }
   if (req.method !== 'POST') { return res.status(405).json({ error: 'Method Not Allowed' }); }
   
-  const { MASTER_STORE_DOMAIN, ADMIN_API_ACCESS_TOKEN } = process.env;
-  if (!MASTER_STORE_DOMAIN || !ADMIN_API_ACCESS_TOKEN) {
+  // UPDATED: Now using Client ID and Client Secret (shpss_)
+  const { MASTER_STORE_DOMAIN, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET } = process.env;
+  if (!MASTER_STORE_DOMAIN || !SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET) {
       console.error("CRITICAL: Missing environment variables!");
       return res.status(500).json({ error: "Server configuration error." });
   }
   
-  const shopifyRestEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/2024-10`;
-  const shopifyGraphQLEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/2024-10/graphql.json`;
+  const API_VERSION = '2026-04'; 
+  const shopifyRestEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/${API_VERSION}`;
+  const shopifyGraphQLEndpoint = `https://${MASTER_STORE_DOMAIN}/admin/api/${API_VERSION}/graphql.json`;
   
   try {
+    // STEP 1: Exchange shpss_ Client Secret for a temporary Access Token
+    console.log("Requesting temporary access token from Shopify..." );
+    const tokenResponse = await fetch(`https://${MASTER_STORE_DOMAIN}/admin/oauth/access_token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: SHOPIFY_CLIENT_ID,
+        client_secret: SHOPIFY_CLIENT_SECRET,
+        grant_type: 'client_credentials'
+      } )
+    });
+
+    const tokenData = await tokenResponse.json();
+    if (!tokenResponse.ok || !tokenData.access_token) {
+      throw new Error(`OAuth Error: ${JSON.stringify(tokenData)}`);
+    }
+    
+    // This is the temporary token we will use for the rest of the script
+    const ADMIN_API_ACCESS_TOKEN = tokenData.access_token;
+    console.log("Successfully acquired temporary access token.");
+
     const { items, currency, country } = req.body;
     console.log('Request body:', JSON.stringify(req.body, null, 2));
     console.log(`Creating ${items.length} new product(s)...`);
     if (country) console.log(`Visitor country: ${country}`);
     
-    // STEP 1: Create products and upload images (wait for images to complete)
+    // STEP 2: Create products and upload images
     const productCreationPromises = items.map(async (item, index) => {
       const timestamp = Date.now();
       const random = Math.random().toString(36).substring(2, 6);
       
-      // Prepare image URL once
       let imageUrl = null;
       if (item.image) {
         imageUrl = item.image;
-        if (!imageUrl.startsWith('http://') && !imageUrl.startsWith('https://')) {
-          imageUrl = `https:${imageUrl.replace(/^\/+/, '')}`;
+        if (!imageUrl.startsWith('http://' ) && !imageUrl.startsWith('https://' )) {
+          imageUrl = `https:${imageUrl.replace(/^\/+/, '' )}`;
         }
       }
       
@@ -53,7 +75,6 @@ export default async function handler(req, res) {
         }
       };
       
-      // Create product
       const response = await fetch(`${shopifyRestEndpoint}/products.json`, {
         method: 'POST',
         headers: {
@@ -72,7 +93,7 @@ export default async function handler(req, res) {
       const productId = result.product.id;
       const variantId = result.product.variants[0].id;
       
-      // Upload image and WAIT for completion
+      // Upload image
       if (imageUrl) {
         try {
           await fetch(`${shopifyRestEndpoint}/products/${productId}/images.json`, {
@@ -97,26 +118,23 @@ export default async function handler(req, res) {
     
     const createdProducts = await Promise.all(productCreationPromises);
     
-    // STEP 2: Create draft order with shipping address
+    // STEP 3: Create draft order
     const lineItems = createdProducts.map(product => ({
       variantId: product.variantId,
       quantity: product.quantity
     }));
     
-    // Build draft order input with country
     const draftOrderInput = {
       lineItems: lineItems,
       presentmentCurrencyCode: currency
     };
     
-    // CRITICAL: Use marketRegionCountryCode to set the market/country
-    // This determines pricing, shipping options, and checkout locale
     if (country) {
       draftOrderInput.marketRegionCountryCode = country;
       console.log(`Setting marketRegionCountryCode to: ${country}`);
     }
     
-    // STEP 3: Create draft order using GraphQL
+    // STEP 4: Create draft order using GraphQL
     const draftOrderMutation = `
       mutation draftOrderCreate($input: DraftOrderInput!) {
         draftOrderCreate(input: $input) {
@@ -134,9 +152,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({ 
         query: draftOrderMutation, 
-        variables: { 
-          input: draftOrderInput
-        }, 
+        variables: { input: draftOrderInput }, 
       }),
     });
     
@@ -144,7 +160,7 @@ export default async function handler(req, res) {
     const data = draftOrderResult.data?.draftOrderCreate;
     
     if (data?.userErrors && data.userErrors.length > 0) {
-      // If draft order fails, clean up created products
+      // Cleanup on failure
       await Promise.all(createdProducts.map(product =>
         fetch(`${shopifyRestEndpoint}/products/${product.productId}.json`, {
           method: 'DELETE',
@@ -157,28 +173,21 @@ export default async function handler(req, res) {
     if (data?.draftOrder?.invoiceUrl) {
       let checkoutUrl = data.draftOrder.invoiceUrl;
       
-      // Try to modify the URL path to force the correct locale
       if (country) {
         try {
           const url = new URL(checkoutUrl);
-          
-          // Method 1: Replace /en-us with /en-gb (or appropriate locale)
           const locale = `en-${country.toLowerCase()}`;
           const currentPath = url.pathname;
           
-          // Check if path contains a locale pattern like /en-us/
           const localePattern = /\/[a-z]{2}-[a-z]{2}\//;
           if (localePattern.test(currentPath)) {
             url.pathname = currentPath.replace(localePattern, `/${locale}/`);
-            console.log(`Replaced locale in path: ${currentPath} -> ${url.pathname}`);
           }
           
-          // Method 2: Add locale and country as query parameters as backup
           url.searchParams.set('locale', locale);
           url.searchParams.set('country', country);
           
           checkoutUrl = url.toString();
-          console.log(`Modified checkout URL: ${checkoutUrl}`);
         } catch (err) {
           console.error('Failed to modify URL:', err);
         }
@@ -189,13 +198,6 @@ export default async function handler(req, res) {
         productIds: createdProducts.map(p => p.productId)
       });
     } else {
-      // Clean up created products
-      await Promise.all(createdProducts.map(product =>
-        fetch(`${shopifyRestEndpoint}/products/${product.productId}.json`, {
-          method: 'DELETE',
-          headers: { 'X-Shopify-Access-Token': ADMIN_API_ACCESS_TOKEN },
-        }).catch(() => {})
-      ));
       throw new Error('Could not create checkout URL.');
     }
     
