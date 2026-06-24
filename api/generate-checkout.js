@@ -1,9 +1,11 @@
-// v5.5 - Create Products with Image Upload + Country Detection (Updated for shpss_ OAuth flow)
+// v5.6 - Create Products + Country Detection + Dynamic CORS via Env Variables
 export default async function handler(req, res) {
-  // --- BULLETPROOF CORS HEADERS ---
-  // Dynamically allow the exact domain that is making the request
-  const origin = req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
+  // --- 1. DYNAMIC CORS HANDLING ---
+  // Pull the allowed frontend domain from Vercel variables (e.g., https://kleone-copper.store )
+  // If you forget to set it, it safely falls back to '*' (allow all)
+  const allowedOrigin = process.env.ALLOWED_CORS_DOMAIN || '*';
+  
+  res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS, PATCH, DELETE, POST, PUT');
   res.setHeader(
@@ -11,19 +13,21 @@ export default async function handler(req, res) {
     'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
   );
 
-  // Handle the OPTIONS preflight request immediately
+  // IMMEDIATELY return 200 OK for the browser's preflight check
   if (req.method === 'OPTIONS') { 
     return res.status(200).end(); 
   }
   
-  // Enforce POST method
+  // Enforce POST method for actual requests
   if (req.method !== 'POST') { 
     return res.status(405).json({ error: 'Method Not Allowed' }); 
   }
   // --------------------------------
   
-  // UPDATED: Now using Client ID and Client Secret (shpss_)
+  // --- 2. SHOPIFY BACKEND CONFIG ---
+  // MASTER_STORE_DOMAIN must be your .myshopify.com URL!
   const { MASTER_STORE_DOMAIN, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET } = process.env;
+  
   if (!MASTER_STORE_DOMAIN || !SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET) {
       console.error("CRITICAL: Missing environment variables!");
       return res.status(500).json({ error: "Server configuration error." });
@@ -43,7 +47,7 @@ export default async function handler(req, res) {
         client_id: SHOPIFY_CLIENT_ID,
         client_secret: SHOPIFY_CLIENT_SECRET,
         grant_type: 'client_credentials'
-      }  )
+      } )
     });
 
     const tokenData = await tokenResponse.json();
@@ -51,25 +55,22 @@ export default async function handler(req, res) {
       throw new Error(`OAuth Error: ${JSON.stringify(tokenData)}`);
     }
     
-    // This is the temporary token we will use for the rest of the script
     const ADMIN_API_ACCESS_TOKEN = tokenData.access_token;
     console.log("Successfully acquired temporary access token.");
 
     const { items, currency, country } = req.body;
     console.log('Request body:', JSON.stringify(req.body, null, 2));
-    console.log(`Creating ${items.length} new product(s)...`);
-    if (country) console.log(`Visitor country: ${country}`);
     
     // STEP 2: Create products and upload images
-    const productCreationPromises = items.map(async (item, index) => {
+    const productCreationPromises = items.map(async (item) => {
       const timestamp = Date.now();
       const random = Math.random().toString(36).substring(2, 6);
       
       let imageUrl = null;
       if (item.image) {
         imageUrl = item.image;
-        if (!imageUrl.startsWith('http://'  ) && !imageUrl.startsWith('https://'  )) {
-          imageUrl = `https:${imageUrl.replace(/^\/+/, ''  )}`;
+        if (!imageUrl.startsWith('http://' ) && !imageUrl.startsWith('https://' )) {
+          imageUrl = `https:${imageUrl.replace(/^\/+/, '' )}`;
         }
       }
       
@@ -146,7 +147,6 @@ export default async function handler(req, res) {
     
     if (country) {
       draftOrderInput.marketRegionCountryCode = country;
-      console.log(`Setting marketRegionCountryCode to: ${country}`);
     }
     
     // STEP 4: Create draft order using GraphQL
